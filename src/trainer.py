@@ -4,6 +4,9 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim
+
+from .optimizer.lookahead import LookAhead
 
 from .model import resnet50
 from .data import get_train_loader, get_test_loader
@@ -41,9 +44,10 @@ class Trainer(object):
 
     def _init_optimizer(self):
         """Initialize optimizer."""
-        self._optimizer = torch.optim.SGD(self._model.parameters(),
+        self.base_optimizer = torch.optim.Adam(self._model.parameters(),
                                             lr=self._args.lr,
                                             weight_decay=self._args.weight_decay)
+        self._optimizer = LookAhead(self._model.parameters(), self.base_optimizer)
 
     def _init_train_loader(self, csv_path, batch_size, num_workers):
         """Initialize train data loader."""
@@ -53,6 +57,26 @@ class Trainer(object):
         """Initialize test data loader."""
         _, self._test_loader = get_test_loader(csv_path, batch_size, num_workers)
 
+    def _cutmix(self, imgs, labels):
+        n, _, h, w = imgs.size()
+        indices = torch.randperm(n)
+        cutmix_imgs = torch.index_select(imgs, dim = 0, index = indices)
+        cutmix_labels = torch.index_select(labels, dim = 0, index = indices)
+        lambd = torch.rand(1).item()
+        r_h = np.sqrt(1 - lambd) * h
+        r_w = np.sqrt(1 - lambd) * w
+        r_x = torch.rand(1).item() * (h - r_h) + (r_h / 2)
+        r_y = torch.rand(1).item() * (w - r_w) + (r_w / 2)
+
+        x1 = round(max(0, r_x - r_h / 2))
+        x2 = round(min(h, r_x + r_h / 2))
+        y1 = round(max(0, r_y - r_w / 2))
+        y2 = round(min(w, r_y - r_w / 2))
+
+        cutmix_imgs[:, :, x1:x2, y1:y2] = imgs[:, :, x1:x2, y1:y2]
+
+        return cutmix_imgs, cutmix_labels, labels, lambd
+
     def _train_epoch(self):
         """Train model for an epoch."""
         self._model.train()
@@ -60,8 +84,9 @@ class Trainer(object):
         start_time = time.time()
 
         for batch_idx, (_, imgs, labels) in enumerate(self._train_loader):
-            props = self._model(imgs.cuda())
-            loss = criterion(props, labels.cuda())
+            cutmix_imgs, cutmix_labels, labels, lambd = self._cutmix(imgs, labels)
+            props = self._model(cutmix_imgs.cuda())
+            loss = criterion(props, labels.cuda()) * (1 - lambd) + criterion(props, cutmix_labels.cuda()) * lambd + lambd * np.log(lambd) + (1 - lambd) * np.log(1 - lambd)
 
             self._optimizer.zero_grad()
             loss.backward()
