@@ -11,6 +11,11 @@ from .optimizer.lookahead import LookAhead
 from .model import resnet50
 from .data import get_train_loader, get_test_loader
 
+debug = False
+
+if debug:
+    import cv2
+    from torchvision.transforms import ToPILImage
 
 class Trainer(object):
     def __init__(self, args):
@@ -28,6 +33,10 @@ class Trainer(object):
         self._scheduler = None
         self._train_loader = None
         self._test_loader = None
+
+        if debug:
+            self.print_cnt = 0
+            self.print_freq = 10
 
         self._init_model()
 
@@ -60,8 +69,9 @@ class Trainer(object):
     def _cutmix(self, imgs, labels):
         n, _, h, w = imgs.size()
         indices = torch.randperm(n)
-        cutmix_imgs = torch.index_select(imgs, dim = 0, index = indices)
-        cutmix_labels = torch.index_select(labels, dim = 0, index = indices)
+        shuffled_imgs = torch.index_select(imgs, dim = 0, index = indices)
+        shuffled_labels = torch.index_select(labels, dim = 0, index = indices)
+        cutmix_imgs = torch.zeros_like(shuffled_imgs)
         lambd = torch.rand(1).item()
         r_h = np.sqrt(1 - lambd) * h
         r_w = np.sqrt(1 - lambd) * w
@@ -71,11 +81,30 @@ class Trainer(object):
         x1 = round(max(0, r_x - r_h / 2))
         x2 = round(min(h, r_x + r_h / 2))
         y1 = round(max(0, r_y - r_w / 2))
-        y2 = round(min(w, r_y - r_w / 2))
+        y2 = round(min(w, r_y + r_w / 2))
 
-        cutmix_imgs[:, :, x1:x2, y1:y2] = imgs[:, :, x1:x2, y1:y2]
+        cutmix_imgs = imgs.clone().detach()
+        cutmix_imgs[:, :, x1:x2, y1:y2] = shuffled_imgs[:, :, x1:x2, y1:y2]
+        
+        if debug:
+        
+            self.print_cnt += 1
+            if self.print_cnt % self.print_freq == 0:
+                cutmix_imgs_print = cutmix_imgs[0].cpu().numpy().transpose(1, 2, 0)
+                imgs_print = imgs[0].cpu().numpy().transpose(1, 2, 0)
+                shuffled_imgs_print = shuffled_imgs[0].cpu().numpy().transpose(1, 2, 0)
+                with open(f"debug/{self.print_cnt}.txt", "w") as file:
+                    file.write(f"lambda: {lambd}\n")
+                    file.write(f"x1: {x1}, x2: {x2}\n")
+                    file.write(f"y1: {y1}, y2: {y2}\n")
+                    file.write(f"base image label: {labels[0].item()}\n")
+                    file.write(f"mixed image label: {shuffled_labels[0].item()}\n")
+                cv2.imwrite(f"debug/original{self.print_cnt}.png", imgs_print * 255)
+                cv2.imwrite(f"debug/shuffled{self.print_cnt}.png", shuffled_imgs_print * 255)
+                cv2.imwrite(f"debug/cutmix{self.print_cnt}.png", cutmix_imgs_print * 255)
+            
 
-        return cutmix_imgs, cutmix_labels, labels, lambd
+        return cutmix_imgs, shuffled_labels, labels, lambd
 
     def _train_epoch(self):
         """Train model for an epoch."""
@@ -84,9 +113,9 @@ class Trainer(object):
         start_time = time.time()
 
         for batch_idx, (_, imgs, labels) in enumerate(self._train_loader):
-            cutmix_imgs, cutmix_labels, labels, lambd = self._cutmix(imgs, labels)
+            cutmix_imgs, shuffled_labels, labels, lambd = self._cutmix(imgs, labels)
             props = self._model(cutmix_imgs.cuda())
-            loss = criterion(props, labels.cuda()) * (1 - lambd) + criterion(props, cutmix_labels.cuda()) * lambd + lambd * np.log(lambd) + (1 - lambd) * np.log(1 - lambd)
+            loss = criterion(props, labels.cuda()) * (lambd) + criterion(props, shuffled_labels.cuda()) * (1 - lambd) + lambd * np.log(lambd) + (1 - lambd) * np.log(1 - lambd)
 
             self._optimizer.zero_grad()
             loss.backward()
