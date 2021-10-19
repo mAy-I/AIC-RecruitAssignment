@@ -34,7 +34,10 @@ class Dataset(data.Dataset):
 
 def get_train_loader(csv_path, batch_size, num_workers):
     """Returns data set and data loader for training."""
-    dataset = Dataset(csv_path, transform = None)
+    transform = transforms.Compose([
+        transforms.Resize((HEIGHT, WIDTH)),
+        transforms.ToTensor()])
+    dataset = Dataset(csv_path, transform)
     loader = data.DataLoader(dataset=dataset,
                              batch_size=batch_size,
                              num_workers=num_workers,
